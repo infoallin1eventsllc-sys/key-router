@@ -6,8 +6,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test \"test/*.test.js\"",
-    "test:watch": "node --test --watch \"test/*.test.js\""
+    "test": "node --test test/router.test.js test/resilience.test.js test/contracts.test.js test/server.test.js test/features.test.js",
+    "test:watch": "node --test --watch test/router.test.js test/resilience.test.js test/contracts.test.js test/server.test.js test/features.test.js"
   },
   "engines": {
     "node": ">=20"
