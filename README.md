@@ -39,9 +39,39 @@ The server handles `SIGTERM`/`SIGINT` gracefully: stops accepting, drains in-fli
 
 | Method | Path         | Purpose                                        |
 |--------|--------------|------------------------------------------------|
-| POST   | `/v1/route`  | Route one request; body `{"tokens": <estimate>}` |
+| POST   | `/v1/route`  | Route one request; body `{"tokens": <estimate>, "payload"?: {...}}` |
 | GET    | `/v1/status` | Fleet health: usage, breakers, redacted keys   |
 | GET    | `/healthz`   | Liveness probe for load balancers              |
+
+### Two ways to call `/v1/route`
+
+**Meter only** — you want the routing decision and usage accounting, but you'll make the provider call yourself:
+
+```jsonc
+{ "tokens": 1200 }                    // → { keyId, rotated, reason, tokensUsed }
+```
+
+**Full proxy** — send the provider body as `payload` and Key Router forwards it, so the secret never leaves the server:
+
+```jsonc
+{
+  "tokens": 1200,                     // pre-flight estimate, used to pick a key
+  "payload": {                        // a normal Anthropic Messages request
+    "model": "claude-opus-5",
+    "max_tokens": 1024,
+    "messages": [{ "role": "user", "content": "Draft a launch post." }]
+  }
+}
+// → { keyId, rotated, reason, tokensUsed, model, response }
+```
+
+`tokensUsed` is billed from the provider's real `usage`, not your estimate — an
+estimate that drifts low would let a key sail past its quota unnoticed.
+
+Failures are attributed, not lumped together: `401/403/429/5xx` means the key
+can't serve traffic, so the breaker opens and traffic rotates away from it. A
+`400` means *your* payload was malformed, and is returned as a `400` without
+punishing a perfectly good key.
 
 Every request gets an `x-request-id` header that also appears in the structured JSON logs, so any response can be traced to its log lines.
 
@@ -85,7 +115,7 @@ Three layers, each with a test proving it:
 
 ## Extension seams
 
-- `callProvider()` in `server.js` — replace the stub body with a real `fetch` to your provider; nothing else changes.
+- `callProvider()` in `server.js` — implemented for Anthropic Messages; swap the URL/headers for another provider and nothing else changes.
 - `UsageTracker.snapshot()/restore()` — persistence hook for Redis/DB when you scale past one instance.
 
 ## A note on scope

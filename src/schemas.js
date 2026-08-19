@@ -11,7 +11,8 @@
  */
 
 /** @typedef {{ type: string, required?: boolean, min?: number, max?: number,
- *              enum?: any[], items?: Schema, shape?: Record<string, Rule> }} Rule */
+ *              enum?: any[], items?: Schema, shape?: Record<string, Rule>,
+ *              passthrough?: boolean }} Rule */
 /** @typedef {Record<string, Rule>} Schema */
 
 /**
@@ -40,6 +41,14 @@ export function validate(schema, value, path = '') {
       continue;
     }
     if (rule.type === 'object') {
+      // A `passthrough` field is an opaque payload we forward verbatim to a
+      // provider. We assert that it IS an object and stop there: the provider
+      // owns that contract, not us, so validating its interior would only
+      // couple us to someone else's schema and break when they extend it.
+      if (rule.passthrough) {
+        if (Array.isArray(v)) errors.push(`${p} must be an object`);
+        continue;
+      }
       errors.push(...validate(rule.shape ?? {}, v, p));
       continue;
     }
@@ -65,6 +74,11 @@ export function validate(schema, value, path = '') {
 /** POST /v1/route request body */
 export const RouteRequest = {
   tokens: { type: 'number', required: true, min: 1, max: 10_000_000 },
+  // Optional provider request body (e.g. an Anthropic Messages payload).
+  // Present  → Key Router forwards the call and meters REAL usage.
+  // Absent   → reserve/meter only: you get a routing decision and accounting
+  //            without a provider call, which is all some callers want.
+  payload: { type: 'object', passthrough: true },
 };
 
 /** One entry of the KEYROUTER_KEYS env array */
@@ -83,6 +97,10 @@ export const RouteResponse = {
   rotated: { type: 'boolean', required: true },
   reason: { type: 'string', required: true },
   tokensUsed: { type: 'number', required: true, min: 0 },
+  // Only present when a `payload` was forwarded: the provider's own reply,
+  // passed through untouched, plus the model that actually served it.
+  model: { type: 'string' },
+  response: { type: 'object', passthrough: true },
 };
 
 /** One key entry inside StatusResponse */
