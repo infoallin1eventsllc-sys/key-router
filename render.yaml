@@ -1,0 +1,29 @@
+# Render blueprint — deploys Key Router straight from this repo.
+# In the Render dashboard: New → Blueprint → pick this repo. Then set the
+# secret env vars marked sync:false below (never commit real keys).
+services:
+  - type: web
+    name: key-router
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev || true
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # Fleet definition, e.g.
+      # [{"id":"primary","provider":"anthropic","limit":1000000}]
+      - key: KEYROUTER_KEYS
+        sync: false
+      # One KEYROUTER_SECRET_<id> per key id above.
+      - key: KEYROUTER_SECRET_primary
+        sync: false
+      # Bearer token callers must present. Set this — without it the proxy is open.
+      - key: KEYROUTER_AUTH_TOKEN
+        sync: false
+      # Keep metering across restarts.
+      - key: KEYROUTER_STATE_FILE
+        value: /tmp/keyrouter.state.json
+      - key: KEYROUTER_THRESHOLD
+        value: "80"
