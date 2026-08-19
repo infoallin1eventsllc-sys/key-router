@@ -1,33 +1,72 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
-  LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip, Legend,
+  LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip, Legend,
 } from "recharts";
 import {
   Key, Activity, AlertTriangle, Shield, Play, Pause, Plus, Eye, EyeOff,
-  Trash2, Zap, RefreshCw, CheckCircle2, XCircle, Radio, Power, Wrench,
+  Trash2, RefreshCw, CheckCircle2, XCircle, Radio, Power, Wrench,
 } from "lucide-react";
 
 /* =========================================================================
-   GRAFANA-INSPIRED PALETTE
+   MERIDIAN INTERFACE PALETTE
+
+   The same tokens as the marketing-system tech-stack page, so the router
+   reads as one product with the rest of the studio's work: warm ivory
+   ground, charcoal text, slate/steel/teal accents.
+
+   Interactive accent and status colour are deliberately kept apart. Steel
+   means "you can act on this"; teal / amber / brick mean "this is the state
+   of the fleet". If the two shared a hue you could not tell a button from a
+   warning at a glance, which on an operations console is the whole job.
    ========================================================================= */
 const C = {
-  bg: "#0B0C0E",
-  panel: "#141619",
-  panel2: "#1A1D21",
-  border: "#2C3235",
-  text: "#D8D9DA",
-  muted: "#8E9297",
-  green: "#73BF69",
-  yellow: "#F2CC0C",
-  orange: "#FF9830",
-  red: "#F2495C",
-  blue: "#5794F2",
-  purple: "#B877D9",
-  cyan: "#37D0D6",
+  bg:      "#F5F4EF",  // paper — warm ivory
+  panel:   "#FFFFFF",  // card
+  panel2:  "#FAFAF7",  // inset surface: key cards, tiles
+  track:   "#EAE7DE",  // meter troughs, switch-off
+  field:   "#FFFFFF",  // inputs
+  border:  "#E7E5DD",  // warm hairline
+  text:    "#23262B",  // ink
+  muted:   "#5B626C",  // ink-soft
+  faint:   "#8A8F98",
+
+  // Status — read as fleet state, never as an affordance.
+  green:   "#3E7C86",  // teal   — healthy
+  yellow:  "#B07D2B",  // amber  — near limit
+  orange:  "#A9662C",
+  red:     "#B0473E",  // brick  — exhausted / error
+  cyan:    "#4E8E99",  // light teal — recovery
+
+  // Brand — steel is the interactive accent, slate the structural one.
+  blue:    "#4F6D8C",  // steel
+  purple:  "#3E4C63",  // slate
 };
-const SERIES_COLORS = [C.green, C.blue, C.purple, C.orange, C.cyan, C.yellow];
+
+// Six series hues that stay distinguishable on ivory without leaving the
+// brand's world — no stock chart rainbow.
+const SERIES_COLORS = ["#4F6D8C", "#3E7C86", "#3E4C63", "#8A6A4F", "#6E7F5B", "#7A6284"];
+
+const DISPLAY = "'Sora', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif";
+const SANS = "'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif";
 const MONO = "ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
-const SANS = "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif";
+
+const CARD_SHADOW =
+  "0 1px 2px rgba(35,38,43,0.04), 0 18px 40px -28px rgba(35,38,43,0.30)";
+
+/* The studio monogram, same path as the tech-stack page's header. */
+function MeridianMark({ size = 26 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <defs>
+        <linearGradient id="krmg" x1="8" y1="12" x2="56" y2="52" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#3E4C63" /><stop offset="1" stopColor="#5B6472" />
+        </linearGradient>
+      </defs>
+      <path d="M11 52V16.5C11 13.5 14.7 12.2 16.6 14.5L32 33L47.4 14.5C49.3 12.2 53 13.5 53 16.5V52H45V27L34.8 39.2C33.4 40.9 30.6 40.9 29.2 39.2L19 27V52H11Z" fill="url(#krmg)" />
+      <rect x="31" y="12" width="2" height="40" rx="1" fill="#5B6472" opacity="0.55" />
+    </svg>
+  );
+}
 
 /* =========================================================================
    STATUS MODEL (unchanged logic — derived, never stored)
@@ -80,12 +119,19 @@ const seed = () => [
 ];
 const mask = (s) => (s.length <= 10 ? "••••••" : `${s.slice(0, 7)}••••${s.slice(-4)}`);
 const fmt = (n) => Math.round(n).toLocaleString();
-const gaugeColor = (p, threshold) => (p >= 100 ? C.red : p >= threshold ? C.yellow : C.green);
+// Most gauges here measure consumption, where a high number is bad. One of
+// them ("Keys routable") measures availability, where a high number is good.
+// Colouring both the same way told the operator that a fully healthy fleet
+// was critical — so the direction is now explicit at the call site.
+const gaugeColor = (p, threshold, invert = false) =>
+  invert
+    ? (p >= threshold ? C.green : p > 0 ? C.yellow : C.red)
+    : (p >= 100 ? C.red : p >= threshold ? C.yellow : C.green);
 
 /* =========================================================================
    GRAFANA-STYLE RADIAL GAUGE (SVG arc with threshold coloring)
    ========================================================================= */
-function Gauge({ value, label, sub, threshold = 80, size = 108 }) {
+function Gauge({ value, label, sub, threshold = 80, size = 108, invert = false }) {
   const clamped = Math.min(100, Math.max(0, value));
   const r = size / 2 - 10;
   const cx = size / 2, cy = size / 2;
@@ -102,7 +148,7 @@ function Gauge({ value, label, sub, threshold = 80, size = 108 }) {
   };
   const start = -135, sweep = 270;
   const valDeg = start + (sweep * clamped) / 100;
-  const color = gaugeColor(clamped, threshold);
+  const color = gaugeColor(clamped, threshold, invert);
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
       <svg width={size} height={size}>
@@ -174,28 +220,31 @@ function Heatmap({ keys, heat }) {
    TERMINAL PANEL — structured logs, same shape the real backend emits
    ========================================================================= */
 function Terminal({ log }) {
-  const lvlColor = { info: C.blue, switch: C.cyan, error: C.red, warn: C.yellow };
+  // On ink, the ivory-tuned status hues go muddy — these are the same
+  // families lifted for a dark ground.
+  const TERM_LVL = { info: "#8FB0CE", switch: "#6FC3CD", error: "#E38A80", warn: "#E0B45F" };
+  const TERM_DOTS = ["#E38A80", "#E0B45F", "#6FC3CD"];
   return (
     <div style={{
-      background: "#0A0B0D", border: `1px solid ${C.border}`, borderRadius: 8,
-      padding: "10px 12px", height: "100%", minHeight: 190, maxHeight: 420, overflowY: "auto",
+      background: "#23262B", border: "1px solid #33373E", borderRadius: 10,
+      padding: "12px 14px", flex: 1, minHeight: 190, overflowY: "auto",
       fontFamily: MONO, fontSize: 11, lineHeight: 1.75,
     }}>
       <div style={{ display: "flex", gap: 5, marginBottom: 8 }}>
-        {[C.red, C.yellow, C.green].map((c) => (
+        {TERM_DOTS.map((c) => (
           <span key={c} style={{ width: 9, height: 9, borderRadius: 999, background: c }} />
         ))}
-        <span style={{ color: C.muted, marginLeft: 6, fontSize: 10.5 }}>key-router · structured logs</span>
+        <span style={{ color: "#8A8F98", marginLeft: 6, fontSize: 10.5 }}>key-router · structured logs</span>
       </div>
-      {log.length === 0 && <span style={{ color: C.muted }}>$ waiting for traffic…</span>}
+      {log.length === 0 && <span style={{ color: "#8A8F98" }}>$ waiting for traffic…</span>}
       {log.map((e) => (
         <div key={e.id} style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-          <span style={{ color: C.muted }}>{`{"ts":"${e.t.toLocaleTimeString("en-US", { hour12: false })}"`}</span>
-          <span style={{ color: C.muted }}>,"level":</span>
-          <span style={{ color: lvlColor[e.type] || C.text }}>"{e.type}"</span>
-          <span style={{ color: C.muted }}>,"msg":</span>
-          <span style={{ color: C.text }}>"{e.msg}"</span>
-          <span style={{ color: C.muted }}>{"}"}</span>
+          <span style={{ color: "#8A8F98" }}>{`{"ts":"${e.t.toLocaleTimeString("en-US", { hour12: false })}"`}</span>
+          <span style={{ color: "#8A8F98" }}>,"level":</span>
+          <span style={{ color: TERM_LVL[e.type] || "#EFEDE6" }}>"{e.type}"</span>
+          <span style={{ color: "#8A8F98" }}>,"msg":</span>
+          <span style={{ color: "#EFEDE6" }}>"{e.msg}"</span>
+          <span style={{ color: "#8A8F98" }}>{"}"}</span>
         </div>
       ))}
     </div>
@@ -203,22 +252,30 @@ function Terminal({ log }) {
 }
 
 /* =========================================================================
-   PANEL WRAPPER — Grafana card chrome
+   PANEL WRAPPER — the tech-stack page's card, carried over verbatim:
+   white ground, warm hairline, one long soft shadow, and a title set as a
+   tracked uppercase eyebrow rather than a heading.
    ========================================================================= */
 function Panel({ title, right, children, accent, className }) {
   return (
-    <div className={className} style={{
+    <div className={`kr-card ${className || ""}`} style={{
       background: C.panel, border: `1px solid ${accent ? accent + "55" : C.border}`,
-      borderRadius: 4, overflow: "hidden", display: "flex", flexDirection: "column",
+      borderRadius: 12, overflow: "hidden", display: "flex", flexDirection: "column",
+      boxShadow: CARD_SHADOW,
     }}>
       <div style={{
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-        padding: "8px 12px", borderBottom: `1px solid ${C.border}`,
+        display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10,
+        padding: "11px 16px", borderBottom: `1px solid ${C.border}`,
       }}>
-        <span style={{ fontFamily: SANS, fontSize: 12.5, fontWeight: 600, color: C.text }}>{title}</span>
+        <span style={{
+          fontFamily: DISPLAY, fontSize: 11, fontWeight: 700, color: C.purple,
+          textTransform: "uppercase", letterSpacing: "0.09em",
+        }}>{title}</span>
         {right}
       </div>
-      <div style={{ padding: 12 }}>{children}</div>
+      <div style={{ padding: 16, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -233,12 +290,12 @@ function KeyCard({ k, active, threshold, revealed, onReveal, onToggle, onDelete,
   return (
     <div style={{
       background: C.panel2, border: `1px solid ${active ? C.green : C.border}`,
-      borderLeft: `3px solid ${color}`, borderRadius: 4, padding: 12,
-      boxShadow: active ? `0 0 14px -6px ${C.green}` : "none",
+      borderLeft: `3px solid ${color}`, borderRadius: 10, padding: 14,
+      boxShadow: active ? `0 10px 22px -18px ${C.green}` : "none",
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <span style={{ fontFamily: SANS, fontWeight: 700, fontSize: 14, color: C.text }}>{k.label}</span>
+          <span style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 14, color: C.text }}>{k.label}</span>
           {active && (
             <span className="kr-live" style={{
               fontFamily: MONO, fontSize: 9.5, fontWeight: 700, letterSpacing: 0.8,
@@ -270,7 +327,7 @@ function KeyCard({ k, active, threshold, revealed, onReveal, onToggle, onDelete,
           <span style={{ color: C.text }}>{fmt(k.used)} / {fmt(k.limit)}</span>
           <span style={{ color: sColor }}>{p.toFixed(0)}%</span>
         </div>
-        <div style={{ position: "relative", height: 6, background: "#0A0B0D", borderRadius: 3, overflow: "hidden" }}>
+        <div style={{ position: "relative", height: 6, background: C.track, borderRadius: 3, overflow: "hidden" }}>
           <div style={{ position: "absolute", inset: 0, width: `${p}%`, background: sColor, transition: "width .35s" }} />
           <div style={{ position: "absolute", top: 0, bottom: 0, left: `${threshold}%`, width: 1.5, background: C.text, opacity: 0.4 }} />
         </div>
@@ -303,9 +360,9 @@ function KeyModal({ initial, onClose, onSave }) {
   const [limit, setLimit] = useState(initial?.limit || 100000);
   const valid = label.trim() && keyVal.trim().length >= 8 && Number(limit) > 0;
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "#000B", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50, padding: 12 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 6, padding: 18 }}>
-        <div style={{ fontFamily: SANS, fontWeight: 700, color: C.text, fontSize: 16, marginBottom: 4 }}>{initial ? "Edit key" : "Add API key"}</div>
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(35,38,43,0.55)", backdropFilter: "blur(2px)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50, padding: 12 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: CARD_SHADOW }}>
+        <div style={{ fontFamily: DISPLAY, fontWeight: 700, color: C.text, fontSize: 17, marginBottom: 4 }}>{initial ? "Edit key" : "Add API key"}</div>
         <div style={{ fontFamily: SANS, fontSize: 12, color: C.muted, marginBottom: 14 }}>Use keys you own. In production this saves to your backend, not the browser.</div>
         {[["Label", label, setLabel, "e.g. Chatbot production", "text"],
           ["API key", keyVal, setKeyVal, "sk-…", "mono"],
@@ -560,24 +617,47 @@ export default function KeyRouter() {
     .filter(({ s }) => ["error", "exhausted", "warning"].includes(s));
 
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: SANS, padding: "14px 10px 40px" }}>
+    <div style={{
+      minHeight: "100vh", color: C.text, fontFamily: SANS, padding: "22px 16px 48px",
+      background: `radial-gradient(900px 500px at 12% -8%, rgba(62,76,99,0.06), transparent 60%),
+                   radial-gradient(760px 460px at 92% 0%, rgba(79,109,140,0.06), transparent 55%),
+                   ${C.bg}`,
+      backgroundAttachment: "fixed",
+      WebkitFontSmoothing: "antialiased",
+    }}>
       <style>{`
         button { cursor: pointer; }
+        /* Numbers in this UI are read in columns — keep them from dancing. */
+        .kr-grid, .kr-grid input, .kr-grid select { font-variant-numeric: tabular-nums; }
+        .kr-card { transition: transform .35s cubic-bezier(.2,.7,.2,1), border-color .35s, box-shadow .35s; }
+        .kr-card:hover {
+          transform: translateY(-2px);
+          border-color: #C9D0DA;
+          box-shadow: 0 1px 2px rgba(35,38,43,0.05), 0 26px 50px -28px rgba(62,76,99,0.35);
+        }
+        button:focus-visible, input:focus-visible, select:focus-visible {
+          outline: 2px solid ${C.blue}; outline-offset: 3px; border-radius: 8px;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .kr-card { transition: none; }
+          .kr-card:hover { transform: none; }
+        }
         @media (prefers-reduced-motion: no-preference) {
           .kr-live { animation: krpulse 1.5s ease-in-out infinite; }
           @keyframes krpulse { 0%,100%{opacity:1} 50%{opacity:.5} }
         }
         input, select { outline: none; }
-        input:focus, select:focus { border-color: ${C.green} !important; }
-        ::placeholder { color: ${C.muted}; }
-        ::-webkit-scrollbar { width: 6px; } 
-        ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 3px; }
+        input:focus, select:focus { border-color: ${C.blue} !important; }
+        ::placeholder { color: ${C.faint}; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-thumb { background: #D8D5CB; border-radius: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
 
         /* Grafana-style 12-column dashboard grid */
         .kr-grid {
           display: grid;
           grid-template-columns: repeat(12, 1fr);
-          gap: 10px;
+          gap: 14px;
           align-items: stretch;
         }
         .span12 { grid-column: span 12; }
@@ -603,11 +683,19 @@ export default function KeyRouter() {
       <div className="kr-grid" style={{ maxWidth: 1320, margin: "0 auto" }}>
         {/* Header */}
         <div className="span12" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, padding: "0 2px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-            <Zap size={20} color={C.green} />
+          <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+            <MeridianMark size={30} />
             <div>
-              <div style={{ fontWeight: 800, fontSize: 17, letterSpacing: -0.2 }}>Key Router</div>
-              <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.muted }}>fleet observability · auto-failover</div>
+              <div style={{
+                fontFamily: DISPLAY, fontSize: 10, fontWeight: 700, color: C.muted,
+                textTransform: "uppercase", letterSpacing: "0.14em", marginBottom: 1,
+              }}>Meridian Interface</div>
+              <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, letterSpacing: -0.3, lineHeight: 1.1 }}>
+                Key Router
+              </div>
+              <div style={{ fontFamily: SANS, fontSize: 12, color: C.muted, marginTop: 2 }}>
+                Fleet observability and automatic failover across your API keys
+              </div>
             </div>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
@@ -631,7 +719,7 @@ export default function KeyRouter() {
           )
         }>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-            <div style={{ display: "inline-flex", border: `1px solid ${C.border}`, borderRadius: 4, overflow: "hidden" }}>
+            <div style={{ display: "inline-flex", border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
               {["demo", "live"].map((m) => (
                 <button key={m} onClick={() => setMode(m)} style={{
                   padding: "7px 16px", fontSize: 12, fontWeight: 700, fontFamily: SANS, border: "none",
@@ -661,7 +749,8 @@ export default function KeyRouter() {
           <div style={{ display: "flex", justifyContent: "space-around", flexWrap: "wrap", gap: 6 }}>
             <Gauge value={fleetPct} threshold={threshold} label="Fleet capacity used" sub={`${fmt(totalUsed)} tok`} />
             <Gauge value={active ? pct(active) : 0} threshold={threshold} label="Active key usage" sub={active ? active.label.slice(0, 14) : "none"} />
-            <Gauge value={keys.length ? (routableCount / keys.length) * 100 : 0} threshold={50} label="Keys routable" sub={`${routableCount} of ${keys.length}`} />
+            <Gauge value={keys.length ? (routableCount / keys.length) * 100 : 0} threshold={100} invert
+              label="Keys routable" sub={`${routableCount} of ${keys.length}`} />
           </div>
         </Panel>
 
@@ -669,7 +758,7 @@ export default function KeyRouter() {
         <Panel className="span5" title="Router config" right={
           <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, color: C.muted }}>
             auto-switch
-            <button onClick={() => setAuto((a) => !a)} disabled={isLive} style={{ width: 38, height: 20, borderRadius: 999, border: `1px solid ${C.border}`, background: (isLive || auto) ? C.green : "#0A0B0D", position: "relative", padding: 0, opacity: isLive ? 0.5 : 1 }}>
+            <button onClick={() => setAuto((a) => !a)} disabled={isLive} style={{ width: 38, height: 20, borderRadius: 999, border: `1px solid ${C.border}`, background: (isLive || auto) ? C.green : C.track, position: "relative", padding: 0, opacity: isLive ? 0.5 : 1 }}>
               <span style={{ position: "absolute", top: 2, left: auto ? 19 : 2, width: 14, height: 14, borderRadius: 999, background: auto ? C.bg : C.muted, transition: "left .2s" }} />
             </button>
           </label>
@@ -707,14 +796,15 @@ export default function KeyRouter() {
           <div style={{ height: 220 }}>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={series} margin={{ top: 4, right: 4, left: -26, bottom: 0 }}>
+                <CartesianGrid stroke={C.border} strokeDasharray="2 4" vertical={false} />
                 <XAxis dataKey="t" tick={{ fill: C.muted, fontSize: 9.5, fontFamily: MONO }} axisLine={{ stroke: C.border }} tickLine={false} />
                 <YAxis tick={{ fill: C.muted, fontSize: 9.5, fontFamily: MONO }} axisLine={false} tickLine={false} />
-                <Tooltip contentStyle={{ background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 4, fontSize: 11, fontFamily: MONO }} labelStyle={{ color: C.muted }} />
+                <Tooltip contentStyle={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 11, fontFamily: MONO, boxShadow: CARD_SHADOW }} labelStyle={{ color: C.muted }} />
                 <Legend wrapperStyle={{ fontSize: 10.5, fontFamily: SANS }}
                   formatter={(id) => keys.find((k) => k.id === id)?.label || id} />
                 {keys.map((k) => (
                   <Line key={k.id} type="stepAfter" dataKey={k.id} stroke={keyColor[k.id]}
-                    strokeWidth={1.8} dot={false} isAnimationActive={false} />
+                    strokeWidth={2.2} dot={false} isAnimationActive={false} />
                 ))}
               </LineChart>
             </ResponsiveContainer>
@@ -752,8 +842,8 @@ export default function KeyRouter() {
           <Terminal log={log} />
         </Panel>
 
-        <div className="span12" style={{ fontSize: 11, color: C.muted, lineHeight: 1.5, padding: "0 2px" }}>
-          <strong style={{ color: C.text }}>Security:</strong> demo holds mock keys in memory only. In production
+        <div className="span12" style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.6, padding: "0 4px" }}>
+          <strong style={{ color: C.text, fontFamily: DISPLAY }}>Security:</strong> demo holds mock keys in memory only. In production
           this dashboard polls the Key Router backend's <code style={{ fontFamily: MONO }}>/v1/status</code> endpoint
           (bearer-token auth, CORS allow-listed) — raw keys never reach the browser.
         </div>
@@ -766,11 +856,11 @@ export default function KeyRouter() {
 
 /* helpers */
 const iconBtn = { background: "transparent", border: "none", color: C.muted, display: "grid", placeItems: "center", padding: 2 };
-const input = { width: "100%", background: "#0A0B0D", border: `1px solid ${C.border}`, borderRadius: 4, padding: "9px 10px", color: C.text, fontSize: 13, fontFamily: SANS };
+const input = { width: "100%", background: C.field, border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 11px", color: C.text, fontSize: 13, fontFamily: SANS };
 function chip(color) {
   return {
     display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 600,
     fontFamily: SANS, color, background: `${color}16`, border: `1px solid ${color}44`,
-    borderRadius: 4, padding: "6px 10px",
+    borderRadius: 8, padding: "6px 11px",
   };
 }
