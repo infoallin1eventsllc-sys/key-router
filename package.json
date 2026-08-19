@@ -6,13 +6,19 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test test/router.test.js test/resilience.test.js test/contracts.test.js test/server.test.js test/features.test.js",
-    "test:watch": "node --test --watch test/router.test.js test/resilience.test.js test/contracts.test.js test/server.test.js test/features.test.js"
+    "test": "node --test test/router.test.js test/resilience.test.js test/contracts.test.js test/server.test.js test/features.test.js test/provider.test.js test/providers.test.js",
+    "test:watch": "node --test --watch test/router.test.js test/resilience.test.js test/contracts.test.js test/server.test.js test/features.test.js test/provider.test.js test/providers.test.js"
   },
   "engines": {
     "node": ">=20"
   },
-  "keywords": ["api-keys", "failover", "circuit-breaker", "rate-limit", "proxy"],
+  "keywords": [
+    "api-keys",
+    "failover",
+    "circuit-breaker",
+    "rate-limit",
+    "proxy"
+  ],
   "license": "MIT",
   "dependencies": {}
 }

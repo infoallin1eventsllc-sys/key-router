@@ -15,11 +15,11 @@ Browser dashboard ──▶ Key Router (this repo) ──▶ Provider API
 
 ```bash
 export KEYROUTER_KEYS='[{"id":"primary","provider":"anthropic","limit":100000},
-                        {"id":"backup","provider":"anthropic","limit":100000}]'
+                        {"id":"backup","provider":"openai","limit":100000}]'
 export KEYROUTER_SECRET_primary='sk-ant-...'
-export KEYROUTER_SECRET_backup='sk-ant-...'
+export KEYROUTER_SECRET_backup='sk-...'
 npm start          # listens on $PORT, default 8787
-npm test           # 22 tests: unit, integration, contract
+npm test           # 36 tests: unit, integration, contract, provider
 ```
 
 Optional config:
@@ -31,6 +31,7 @@ Optional config:
 | `KEYROUTER_STATE_FILE` | Path for the usage snapshot so metering survives restarts (atomic write-then-rename; corrupt files start fresh, never crash). | unset (in-memory) |
 | `KEYROUTER_THRESHOLD` | Rotate at this % of quota | `80` |
 | `KEYROUTER_STRATEGY` | `lowest-usage` \| `round-robin` | `lowest-usage` |
+| `KEYROUTER_URL_<PROVIDER>` | Override a vendor's endpoint, e.g. `KEYROUTER_URL_OPENAI` | vendor default |
 | `KEYROUTER_WINDOW_MS` | Metering window | 24 h |
 
 The server handles `SIGTERM`/`SIGINT` gracefully: stops accepting, drains in-flight requests, saves state, with a 5 s hard deadline so a hung connection can't block a deploy.
@@ -39,11 +40,79 @@ The server handles `SIGTERM`/`SIGINT` gracefully: stops accepting, drains in-fli
 
 | Method | Path         | Purpose                                        |
 |--------|--------------|------------------------------------------------|
-| POST   | `/v1/route`  | Route one request; body `{"tokens": <estimate>}` |
+| POST   | `/v1/route`  | Route one request; body `{"tokens": <estimate>, "payload"?: {...}}` |
 | GET    | `/v1/status` | Fleet health: usage, breakers, redacted keys   |
 | GET    | `/healthz`   | Liveness probe for load balancers              |
 
+### Two ways to call `/v1/route`
+
+**Meter only** — you want the routing decision and usage accounting, but you'll make the provider call yourself:
+
+```jsonc
+{ "tokens": 1200 }                    // → { keyId, rotated, reason, tokensUsed }
+```
+
+**Full proxy** — send the provider body as `payload` and Key Router forwards it, so the secret never leaves the server:
+
+```jsonc
+{
+  "tokens": 1200,                     // pre-flight estimate, used to pick a key
+  "payload": {                        // a normal Anthropic Messages request
+    "model": "claude-opus-5",
+    "max_tokens": 1024,
+    "messages": [{ "role": "user", "content": "Draft a launch post." }]
+  }
+}
+// → { keyId, rotated, reason, tokensUsed, model, response }
+```
+
+`tokensUsed` is billed from the provider's real `usage`, not your estimate — an
+estimate that drifts low would let a key sail past its quota unnoticed.
+
+Failures are attributed, not lumped together: `401/403/429/5xx` means the key
+can't serve traffic, so the breaker opens and traffic rotates away from it. A
+`400` means *your* payload was malformed, and is returned as a `400` without
+punishing a perfectly good key.
+
 Every request gets an `x-request-id` header that also appears in the structured JSON logs, so any response can be traced to its log lines.
+
+## Providers — one fleet, several vendors
+
+Each key declares its own `provider`, and that decides where its traffic goes.
+Routing, metering and circuit breakers never learn which vendor served a
+request, so a single fleet can mix vendors — and owners:
+
+```jsonc
+[
+  { "id": "acme-claude", "provider": "anthropic", "limit": 500000 },
+  { "id": "acme-gpt",    "provider": "openai",    "limit": 500000 },
+  { "id": "mine-claude", "provider": "anthropic", "limit": 100000 }
+]
+```
+
+| Provider | Endpoint | Auth | Usage metered from |
+|---|---|---|---|
+| `anthropic` (default) | `/v1/messages` | `x-api-key` | `input_tokens + output_tokens` |
+| `openai` | `/v1/chat/completions` | `Authorization: Bearer` | `total_tokens` |
+
+`provider` is optional and defaults to `anthropic`, so existing configs keep
+working. An unrecognised name throws **at boot** with the list of known
+providers — a typo should stop a deploy, not quietly send a client's traffic to
+the wrong vendor.
+
+Set `KEYROUTER_URL_ANTHROPIC` / `KEYROUTER_URL_OPENAI` to point an adapter at a
+different endpoint (Azure OpenAI, a corporate gateway, a compatible proxy)
+without touching code.
+
+**Adding a vendor** is one entry in `src/providers.js` — endpoint, headers,
+where usage lives. Nothing above that layer changes.
+
+### Whose keys?
+
+Key Router manages keys; it does not supply them. Every call bills whoever owns
+the key it routed to. That is the feature: give each client their own key entry
+with their own `limit`, and their marketing runs on their budget, metered
+separately, never on yours.
 
 ## Data contracts (`src/schemas.js`)
 
@@ -61,6 +130,7 @@ src/
   router.js           key selection & rotation decisions (pure)
   circuit-breaker.js  closed → open → half-open failure isolation (pure)
   usage-tracker.js    windowed token metering (pure, injectable clock)
+  providers.js        one adapter per vendor: endpoint, auth, usage mapping
   key-store.js        the ONLY module that touches raw secrets
   server.js           node:http wiring; executes decisions, owns no logic
 ```
@@ -85,7 +155,7 @@ Three layers, each with a test proving it:
 
 ## Extension seams
 
-- `callProvider()` in `server.js` — replace the stub body with a real `fetch` to your provider; nothing else changes.
+- `callProvider()` in `server.js` — implemented for Anthropic Messages; swap the URL/headers for another provider and nothing else changes.
 - `UsageTracker.snapshot()/restore()` — persistence hook for Redis/DB when you scale past one instance.
 
 ## A note on scope

@@ -4,8 +4,9 @@
  * Built on node:http deliberately: no Express, no middleware stack, no
  * supply chain. For three endpoints, the platform is enough.
  *
- *   POST /v1/route    body: {"tokens": <estimated>} → routing decision +
- *                     provider call (stubbed seam), meters real usage
+ *   POST /v1/route    body: {"tokens": <estimate>, "payload"?: <provider body>}
+ *                     → routing decision; with a payload it forwards to
+ *                     Anthropic and meters the usage actually consumed
  *   GET  /v1/status   fleet health, redacted keys, breaker states
  *   GET  /healthz     liveness for load balancers
  *
@@ -22,6 +23,7 @@ import { UsageTracker } from './usage-tracker.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { route, STRATEGIES } from './router.js';
 import { validate, RouteRequest } from './schemas.js';
+import { adapterFor } from './providers.js';
 
 const MAX_BODY_BYTES = 64 * 1024; // reject absurd payloads early
 
@@ -33,13 +35,49 @@ function log(level, msg, extra = {}) {
 }
 
 /**
- * Provider seam. Replace the body of this function with a real fetch to
- * api.anthropic.com (or any provider) — nothing else in the codebase
- * changes. It receives the secret here and nowhere else.
+ * Provider call. This is the ONLY place a raw secret is used, and it never
+ * leaves this function — not into a log line, not into a response body.
+ *
+ * Two modes, chosen by whether the caller sent a `payload`:
+ *   - no payload → reserve/meter only. Returns the routing decision and books
+ *     the estimate. Useful when the caller makes its own provider call, and it
+ *     keeps the network out of the test suite.
+ *   - payload    → forward to the key's provider and meter what was ACTUALLY
+ *     consumed. Which vendor that is comes from the key's own `provider`
+ *     field, so one fleet can mix Anthropic and OpenAI keys.
+ *     Billing off the real usage instead of the client's estimate is the whole
+ *     reason to route through here; an estimate that drifts low would let a key
+ *     sail past its quota unnoticed.
  */
-async function callProvider({ secret, tokens }) {
-  void secret; // used by the real implementation
-  return { ok: true, tokensUsed: tokens };
+async function callProvider({ secret, tokens, payload, provider, env = {}, signal }) {
+  if (!payload) return { ok: true, tokensUsed: tokens };
+
+  const adapter = adapterFor(provider, env);
+
+  const res = await fetch(adapter.url, {
+    method: 'POST',
+    headers: adapter.headers(secret),
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  const body = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    const err = new Error(adapter.errorMessage(body) || `provider responded ${res.status}`);
+    err.status = res.status;
+    // Distinguish "this key is bad" from "this request was bad". A 401/403/429
+    // or 5xx means the key can't serve traffic, so it should trip the breaker
+    // and rotate. A 400 means the CALLER sent malformed input — quarantining a
+    // perfectly good key for someone else's typo would be a self-inflicted
+    // outage, so we surface it without penalising the key.
+    err.clientError = res.status >= 400 && res.status < 500
+      && ![401, 403, 429].includes(res.status);
+    throw err;
+  }
+
+  const used = adapter.usage(body);
+  return { ok: true, tokensUsed: used || tokens, response: body, model: body?.model };
 }
 
 /**
@@ -67,6 +105,12 @@ export function createApp({
   const breakers = new Map(
     store.meta.map((m) => [m.id, new CircuitBreaker({ now })]),
   );
+
+  // Resolve every key's provider up front. A typo'd provider name should kill
+  // the boot with a readable message, not surface as a mystery 502 on the
+  // first request that happens to route to that key.
+  const providerOf = new Map(store.meta.map((m) => [m.id, m.provider]));
+  for (const m of store.meta) adapterFor(m.provider, env);
 
   // ── Client authentication ─────────────────────────────────────────────
   // KEYROUTER_AUTH_TOKEN protects the proxy itself: without it, anyone who
@@ -133,7 +177,7 @@ export function createApp({
     if (problems.length > 0) {
       return [400, { error: 'invalid request body', details: problems }];
     }
-    const { tokens } = body;
+    const { tokens, payload } = body;
 
     const decision = route(fleet(), { activeId, ...config });
     if (!decision.keyId) {
@@ -153,6 +197,9 @@ export function createApp({
       const result = await provider({
         secret: store.secretFor(decision.keyId),
         tokens,
+        payload,
+        provider: providerOf.get(decision.keyId),
+        env,
       });
       breaker.recordSuccess();
       usage.record(decision.keyId, result.tokensUsed ?? tokens);
@@ -161,8 +208,18 @@ export function createApp({
         rotated: decision.rotated,
         reason: decision.reason,
         tokensUsed: result.tokensUsed ?? tokens,
+        ...(result.model ? { model: result.model } : {}),
+        ...(result.response ? { response: result.response } : {}),
       }];
     } catch (err) {
+      if (err.clientError) {
+        // Caller's payload was rejected by the provider. Not the key's fault,
+        // so the breaker stays closed and this key keeps serving others.
+        log('warn', 'provider rejected request', {
+          requestId, keyId: decision.keyId, status: err.status,
+        });
+        return [400, { error: err.message, keyId: decision.keyId }];
+      }
       breaker.recordFailure();
       log('error', 'provider call failed', {
         requestId, keyId: decision.keyId, error: err.message,
